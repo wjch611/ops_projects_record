@@ -1,3 +1,5 @@
+[TOC]
+
 ## 一、需求
 
 ##### 背景：
@@ -151,7 +153,7 @@ sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
 sudo nginx -t
 ```
 
-##### 8. 替换wp数据库的旧链接
+##### 8. 替换wp数据库的旧链接（wp search-replace）
 
 安装WP-CLI
 
@@ -224,7 +226,110 @@ server {
 sudo certbot renew --dry-run
 ```
 
-## 三、添加redis缓存
+## 三、数据一致性检查
+
+> 基于：hosts灰度验证
+> 
+> 在一致性检查之前，先改本地/etc/hosts，不要直接修改dns解析
+
+文件层sumcheck验证
+
+```
+cd /var/www/html
+find . -type f -exec sha256sum {} + > file_checksum.txt
+
+整个打包->新服务->解压->验证
+sha256sum -c file_checksum.txt
+```
+
+数据库验证
+
+> old和new都执行这个脚本，结果进行对比
+> 
+> 查询目标数据库的所有表，表的行数
+
+```
+#!/bin/bash
+
+DB="wordpress"
+
+OUTPUT="db_verify_$(date +%F_%H-%M-%S).txt"
+
+echo "===== Database Verification Report =====" | tee $OUTPUT
+echo "Database: $DB" | tee -a $OUTPUT
+echo "Time: $(date)" | tee -a $OUTPUT
+echo "" | tee -a $OUTPUT
+
+# 获取所有表
+tables=$(mysql -N -e "
+SELECT table_name
+FROM information_schema.tables
+WHERE table_schema='$DB';
+")
+
+echo "Table | Rows | Checksum" | tee -a $OUTPUT
+echo "----------------------------------------" | tee -a $OUTPUT
+
+for table in $tables
+do
+    # 获取行数
+    rows=$(mysql -N -e "
+    SELECT COUNT(*) FROM $DB.$table;
+    ")
+
+    # 获取 checksum
+    checksum=$(mysql -N -e "
+    CHECKSUM TABLE $DB.$table;
+    " | awk '{print $2}')
+
+    printf "%-30s %-10s %-20s\n" "$table" "$rows" "$checksum" | tee -a $OUTPUT
+
+done
+
+echo "" | tee -a $OUTPUT
+echo "Verification finished." | tee -a $OUTPUT
+echo "Report saved: $OUTPUT"
+```
+
+业务层验证
+
+> 通过访问前台页面、后台登录、图片资源等功能
+
+## 四、添加nginx安全头
+
+> 配置的位置：不是nginx.conf，是site.conf，并且在server{}中
+
+```
+    # 隐藏 nginx 版本
+    server_tokens off;
+
+    # =============================
+    # 安全响应头
+    # =============================
+
+    #防止点击劫持
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    当前页面是否被 iframe 嵌入？
+      │
+      ├─ 否 → 正常显示
+      │
+      └─ 是 → 检查来源
+               │
+               ├─ 同域 → 允许
+               └─ 非同域 → 拒绝加载
+
+
+    #设置CSP策略，防止XSS（最重要）
+    add_header Content-Security-Policy "
+    default-src 'self' https:;
+    img-src 'self' data: https:;
+    script-src 'self' 'unsafe-inline' https:;
+    style-src 'self' 'unsafe-inline' https:;
+    font-src 'self' data: https:;
+    " always;
+```
+
+## 五、添加redis缓存
 
 安装redis、php-redis、object-cache插件
 
@@ -238,7 +343,7 @@ sudo apt install php-redis -y
 sudo systemctl restart php8.1-fpm
 ```
 
-## 四、logrotate对nginx日志切割
+## 六、logrotate对nginx日志切割
 
 添加规则
 
@@ -273,7 +378,7 @@ sudo vi /etc/logrotate.d/nginx-custom
 sudo logrotate -f /etc/logrotate.d/nginx-custom #手动切割测试
 ```
 
-## 五、自动备份脚本
+## 七、自动备份脚本
 
 > 把html+wp数据库打包压缩，发送到远程机器，并且发送飞书通知。
 > 
@@ -402,7 +507,7 @@ exit 0
 0 3 * * * /home/devops/wp-back.sh >> /home/devops/wp-back.log 2>&1
 ```
 
-## 六、自动监控脚本
+## 八、自动监控脚本
 
 cpu和内存超过阈值报警飞书
 
@@ -471,38 +576,4 @@ exit 0
 
 ```
 * * * * * /home/devops/monitor.sh >> /home/devops/monitor.log 2>&1
-```
-
-## 七、添加NGINX安全头策略
-
-在site.conf的server中
-
-```
-    # 隐藏 nginx 版本
-    server_tokens off;
-
-    # =============================
-    # 安全响应头
-    # =============================
-
-    #防止点击劫持
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    当前页面是否被 iframe 嵌入？
-      │
-      ├─ 否 → 正常显示
-      │
-      └─ 是 → 检查来源
-               │
-               ├─ 同域 → 允许
-               └─ 非同域 → 拒绝加载
-
-
-    #设置CSP策略，防止XSS（最重要）
-    add_header Content-Security-Policy "
-    default-src 'self' https:;
-    img-src 'self' data: https:;
-    script-src 'self' 'unsafe-inline' https:;
-    style-src 'self' 'unsafe-inline' https:;
-    font-src 'self' data: https:;
-    " always;
 ```
