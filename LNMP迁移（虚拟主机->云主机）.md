@@ -30,20 +30,18 @@
 ##### 3. 初始化vps（执行init.sh）
 
 > 1. 设置上海时区
->   
+> 
 > 2. 安装基础软件
->   
+> 
 > 3. 创建一个devops用户（加入sudo组）
->   
+> 
 > 4. 开启ufw，配置入站规则
->   
+> 
 > 5. 配置fail2ban
->   
 
 6. 把跳板机的ssh公钥ssh-copy-id到devops用户
-  
+
 7. 修改ssh规则仅仅允许devops密钥登陆
-  
 
 ##### 4. 安装基础部署软件（nginx、php(php-fpm)、mysql）
 
@@ -284,9 +282,8 @@ sudo logrotate -f /etc/logrotate.d/nginx-custom #手动切割测试
 前提：
 
 1. 配置好.my.cnf
-  
+
 2. 密钥ssh->远程
-  
 
 ```
 #!/bin/bash
@@ -474,4 +471,38 @@ exit 0
 
 ```
 * * * * * /home/devops/monitor.sh >> /home/devops/monitor.log 2>&1
+```
+
+## 七、添加NGINX安全头策略
+
+在site.conf的server中
+
+```
+    # 隐藏 nginx 版本
+    server_tokens off;
+
+    # =============================
+    # 安全响应头
+    # =============================
+
+    #防止点击劫持
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    当前页面是否被 iframe 嵌入？
+      │
+      ├─ 否 → 正常显示
+      │
+      └─ 是 → 检查来源
+               │
+               ├─ 同域 → 允许
+               └─ 非同域 → 拒绝加载
+
+
+    #设置CSP策略，防止XSS（最重要）
+    add_header Content-Security-Policy "
+    default-src 'self' https:;
+    img-src 'self' data: https:;
+    script-src 'self' 'unsafe-inline' https:;
+    style-src 'self' 'unsafe-inline' https:;
+    font-src 'self' data: https:;
+    " always;
 ```
