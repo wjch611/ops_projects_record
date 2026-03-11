@@ -14,12 +14,29 @@
 
 ##### 目标：（单点LNMP架构）
 
-- 阿里云主机 + ubuntu2204 + nginx + wrodpress + mysql
-- 额外做了优化
-  - redis缓存加速
-  - logrotate日志切割
-  - 脚本实现网站自动备份
-  - 脚本实现资源监控报警
+阿里云主机 + ubuntu2204 + nginx + wrodpress + mysql
+
+额外做了优化
+
+- nginx：
+  
+  - https
+  
+  - 伪静态路由
+  
+  - 隐藏nginx版本
+  
+  - csp策略
+  
+  - 防敏感文件读取
+
+- redis缓存加速
+
+- logrotate日志切割
+
+- 脚本实现网站自动备份
+
+- 脚本实现资源监控报警
 
 ## 二、仅迁移
 
@@ -41,9 +58,9 @@
 > 
 > 5. 配置fail2ban
 
-6. 把跳板机的ssh公钥ssh-copy-id到devops用户
+6. 把跳板机的ssh公钥ssh-copy-id到devops用户和root用户
 
-7. 修改ssh规则仅仅允许devops密钥登陆
+7. 修改ssh规则禁用密码登陆（**留下root密钥登陆是因为后面ansible自动化需要**）
 
 ##### 4. 安装基础部署软件（nginx、php(php-fpm)、mysql）
 
@@ -120,34 +137,46 @@ sudo mysql -u root -p wordpress < wordpress.sql
 
 修改wp-config.php数据库配置
 
-##### 7. 修改nginx配置
+##### 7. Nginx配置
 
-备份旧配置
-
-```
-sudo cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak-$(date +%Y%m%d)
-sudo cp -r /etc/nginx/sites-available /etc/nginx/sites-available.bak-$(date +%Y%m%d)
-sudo cp -r /etc/nginx/sites-enabled /etc/nginx/sites-enabled.bak-$(date +%Y%m%d)
-```
-
-删除default配置
-
-```
-sudo rm /etc/nginx/sites-available/default
-
-sudo rm /etc/nginx/sites-enabled/default
-```
+1、链接到enable
 
 在site-available下添加配置/etc/nginx/sites-available/wordpress.conf
-
-链接到enable
 
 ```
 # 链接到 enabled
 sudo ln -sf /etc/nginx/sites-available/wordpress.conf /etc/nginx/sites-enabled/
 ```
 
-测试配置
+2、基础配置
+
+> 1. 监听端口
+> 2. server_name
+> 3. 根目录+index
+> 4. 伪静态路由
+> 5. php socket fastcgi路由
+
+```
+server {
+    listen 80;
+    server_name your_domain.com;
+    root /var/www/wordpress;
+    index index.php index.html;
+
+    location / {
+        try_files $uri $uri/ /index.php?$args;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/var/run/php/php-fpm.sock; # 确认你的 PHP 版本对应路径
+    }
+}
+```
+
+3、配置优化（第四大点）
+
+4、测试配置
 
 ```
 sudo nginx -t
@@ -232,7 +261,7 @@ sudo certbot renew --dry-run
 > 
 > 在一致性检查之前，先改本地/etc/hosts，不要直接修改dns解析
 
-文件层sumcheck验证
+##### 文件层sumcheck验证
 
 ```
 cd /var/www/html
@@ -242,7 +271,7 @@ find . -type f -exec sha256sum {} + > file_checksum.txt
 sha256sum -c file_checksum.txt
 ```
 
-数据库验证
+##### 数据库验证
 
 > old和new都执行这个脚本，结果进行对比
 > 
@@ -291,42 +320,149 @@ echo "Verification finished." | tee -a $OUTPUT
 echo "Report saved: $OUTPUT"
 ```
 
-业务层验证
+##### 业务层验证
 
 > 通过访问前台页面、后台登录、图片资源等功能
 
-## 四、添加nginx安全头
+## 四、优化nginx配置
 
 > 配置的位置：不是nginx.conf，是site.conf，并且在server{}中
 
+##### 隐藏 nginx 版本
+
 ```
+server_tokens off;
+```
+
+##### 设置CSP策略，防止XSS/点击劫持...（最重要）
+
+> - 前台严格+后台宽松（需要在nginx的conf.d/下单独写一个配置文件）
+> 
+> - 先严后宽，浏览器的console查看报错，一步一步添加必须允许的源
+
+```
+# 全局 CSP 策略映射
+map $request_uri $csp_policy {
+    # 【后台策略】
+    "~^/wp-admin"   "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; style-src 'self' 'unsafe-inline' https:; img-src 'self' data: https:; font-src 'self' data: https:; frame-ancestors 'self';";
+
+    # 【登录页策略】
+    "~^/wp-login"   "default-src 'self'; script-src 'self' 'unsafe-inline' https:; style-src 'self' 'unsafe-inline' https:; img-src 'self' data: https:; font-src 'self' data: https:; frame-ancestors 'self';";
+
+    # 【前台策略】默认严格
+    default         "default-src 'self'; script-src 'self' https:; style-src 'self' 'unsafe-inline' https:; img-src 'self' data: https:; font-src 'self' data: https:; frame-ancestors 'none'; object-src 'none'; base-uri 'self';";
+}
+```
+
+```
+server {
+    listen 80 default_server;
+    server_name _;
+    root /var/www/html;
+    index index.php index.html index.htm;
+
     # 隐藏 nginx 版本
     server_tokens off;
 
     # =============================
-    # 安全响应头
+    # 核心安全响应头
+    # =============================
+    # 使用 map 定义的变量
+    add_header Content-Security-Policy $csp_policy always;
+
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+
+    # =============================
+    # 路径与文件保护
     # =============================
 
-    #防止点击劫持
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    当前页面是否被 iframe 嵌入？
-      │
-      ├─ 否 → 正常显示
-      │
-      └─ 是 → 检查来源
-               │
-               ├─ 同域 → 允许
-               └─ 非同域 → 拒绝加载
+    # 禁止访问隐藏文件
+    location ~ /\. {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
 
+    # 禁止访问敏感文件及备份
+    location ~* /(wp-config.php|readme.html|license.txt|\.bak|\.sql|\.env) {
+        deny all;
+    }
 
-    #设置CSP策略，防止XSS（最重要）
-    add_header Content-Security-Policy "
-    default-src 'self' https:;
-    img-src 'self' data: https:;
-    script-src 'self' 'unsafe-inline' https:;
-    style-src 'self' 'unsafe-inline' https:;
-    font-src 'self' data: https:;
-    " always;
+    # 禁止 xmlrpc
+    location = /xmlrpc.php {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+
+    # 禁止 uploads 目录执行 PHP
+    location ~* /wp-content/uploads/.*\.php$ {
+        deny all;
+    }
+
+    # WordPress 核心路由
+    location / {
+        try_files $uri $uri/ /index.php?$args;
+    }
+
+    # =============================
+    # PHP 处理 (优化部分)
+    # =============================
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/php8.1-fpm.sock;
+
+        # 调优缓冲区，防止大页面拉取失败
+        fastcgi_buffers 16 16k; 
+        fastcgi_buffer_size 32k;
+
+        # 确保在 PHP 请求中也发送 CSP Header
+        add_header Content-Security-Policy $csp_policy always;
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
+    # =============================
+    # 静态文件缓存 (优化部分)
+    # =============================
+    location ~* \.(jpg|jpeg|png|gif|ico|css|js|woff|woff2|ttf|svg|eot|otf)$ {
+        expires 30d;
+        access_log off;
+        add_header Cache-Control "public, no-transform";
+
+        # 静态资源通常不需要复杂的 CSP，保持默认同源即可
+        add_header Access-Control-Allow-Origin "*"; 
+    }
+
+    client_max_body_size 64M;
+}
+```
+
+##### 伪静态设置
+
+> try_files uri uri/ /index.php?$args;
+
+```
+1. $uri 根据url去找具体文件，读到就直接返回
+2. $uri/ 找不到这个文件，就找这个文件名的文件夹，如果存在就寻找这个文件夹下面的index
+3. /index.php?$args; 全部找不到，就去根目录下的index.php
+```
+
+根目录下/index.php，一般会有一个逻辑：
+即使搜索不到最后的关键词语也不会报NGINX的404，只会报wordpress的404
+所以判断是否是伪静态就乱输入uri看看有没有nginx的404就行。
+
+##### 阻止敏感文件读取
+
+```
+# 禁止访问敏感文件及备份
+location ~* /(wp-config.php|readme.html|license.txt|\.bak|\.sql|\.env) {
+    deny all;
+}
 ```
 
 ## 五、添加redis缓存
